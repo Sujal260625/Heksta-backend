@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Heksta | Ultra-Fast 5GB File Sharing &amp; Whisper Mode</title>
+  <meta name="description"
+    content="Share large files up to 5GB over LAN or Internet at lightning speeds. Heksta offers encrypted, ephemeral Whisper Mode for secure private conversations." />
+  <link rel="preconnect" href="https://pagead2.googlesyndication.com" />
+
+  <!-- PWA Performance Optimized -->
+
+  <script>
+    // Automatic version check and cache clearing
+    (function () {
+      // VERSION_ID is updated on every deployment
+      const VERSION_ID = '2.0.3';
+      const storedVersion = localStorage.getItem('heksta_version');
+
+      if (!storedVersion || storedVersion !== VERSION_ID) {
+        console.log('New version detected:', VERSION_ID);
+        localStorage.setItem('heksta_version', VERSION_ID);
+
+        // Only reload if we've already loaded once (to avoid infinite loop)
+        if (storedVersion) {
+          // Clear caches if the browser supports it
+          if ('caches' in window) {
+            caches.keys().then(names => {
+              for (let name of names) caches.delete(name);
+            });
+          }
+          window.location.reload(true);
+        }
+      }
+    })();
+  </script>
+
+
+
+  <!-- PWA Support -->
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#1a4d2e" />
+  <link rel="apple-touch-icon" href="/heksta_pwa_icon_512_1773596302842.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Heksta" />
+
+  <!-- Google Sitelinks Structured Data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    "name": "Heksta",
+    "url": "https://heksta.in/",
+    "potentialAction": {
+      "@type": "SearchAction",
+      "target": "https://heksta.in/?search={search_term_string}",
+      "query-input": "required name=search_term_string"
+    }
+  }
+  </script>
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    "itemListElement": [
+      {
+        "@type": "SiteNavigationElement",
+        "position": 1,
+        "name": "Sender Mode",
+        "url": "https://heksta.in/sender"
+      },
+      {
+        "@type": "SiteNavigationElement",
+        "position": 2,
+        "name": "Join",
+        "url": "https://heksta.in/join"
+      },
+      {
+        "@type": "SiteNavigationElement",
+        "position": 3,
+        "name": "Whisper Mode",
+        "url": "https://heksta.in/whisper"
+      }
+    ]
+  }
+  </script>
+
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-2000404380857840"
+    crossorigin="anonymous"></script>
+  <script src="https://pl28875390.effectivegatecpm.com/07/3f/e7/073fe7920427642c01c79fc65a8c027b.js" defer></script>
+
+
+  <style>
+    /* CRITICAL FIX FOR PWA KEYBOARD/INPUT FOCUS on iOS & Android */
+    input,
+    textarea,
+    [contenteditable="true"] {
+      -webkit-user-select: text !important;
+      user-select: text !important;
+      -webkit-appearance: none;
+      appearance: none;
+      touch-action: manipulation;
+    }
+
+    /* Ensure the body doesn't block clicks */
+    body {
+      -webkit-tap-highlight-color: transparent;
+    }
+  </style>
+
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.jsx"></script>
+  <script>
+    // Register Service Worker for PWA
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then(registration => {
+            console.log('SW registered: ', registration);
+
+            // Force an update check on every load
+            registration.update();
+
+            // Handle updates
+            registration.onupdatefound = () => {
+              const installingWorker = registration.installing;
+              installingWorker.onstatechange = () => {
+                if (installingWorker.state === 'installed') {
+                  if (navigator.serviceWorker.controller) {
+                    // New content is available; force a refresh
+                    console.log('New content available, refreshing...');
+                    window.location.reload();
+                  }
+                }
+              };
+            };
+          })
+          .catch(registrationError => {
+            console.log('SW registration failed: ', registrationError);
+          });
+      });
+
+      // Reload when the service worker takes control
+      let refreshing = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (refreshing) return;
+        refreshing = true;
+        window.location.reload();
+      });
+    }
+
+  </script>
+
+</body>
+
+</html>
