@@ -38,7 +38,7 @@ const storage = multer.diskStorage({
 const uploadMiddleware = multer({
   storage: storage,
   limits: {
-    fileSize: 50 * 1024 * 1024 * 1024, // 50GB limit
+    fileSize: 2 * 1024 * 1024 * 1024, // 2GB limit
     fieldSize: 1024 * 1024 * 1024 // 1GB field size
   }
 }).array('files');
@@ -56,7 +56,7 @@ const getServerUrl = () => {
   if (cachedServerUrl) return cachedServerUrl;
 
   if (process.env.NODE_ENV === 'production') {
-    cachedServerUrl = 'https://heksta.in';
+    cachedServerUrl = 'https://heksta-backend-final.onrender.com';
   } else {
     cachedServerUrl = `http://${getLocalIP()}:${PORT}`;
   }
@@ -76,7 +76,7 @@ app.use(express.json());
 
 // CORS Configuration
 app.use(cors({
-  origin: [CLIENT_URL, 'https://heksta.in', 'https://heksta-landind-final.onrender.com'].filter(Boolean),
+  origin: [CLIENT_URL, 'https://heksta.in', 'https://heksta-backend-final.onrender.com'].filter(Boolean),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept']
@@ -147,6 +147,9 @@ app.post('/api/upload/:sessionId', (req, res) => {
   uploadMiddleware(req, res, (err) => {
     if (err) {
       console.error('Upload error:', err);
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'no greater then 2 GB file' });
+      }
       return res.status(500).json({ error: 'Upload failed: ' + err.message });
     }
 
@@ -420,6 +423,11 @@ app.post('/api/session/:sessionId/close', (req, res) => {
   res.json({ message: 'Session closed successfully' });
 });
 
+// GET status to verify deployments
+app.get('/api/status', (req, res) => {
+  res.json({ status: 'Heksta backend running 🚀', version: '2.0.3-leave-fix' });
+});
+
 // ── WHISPER MODE FILE UPLOAD ──
 const whisperUpload = multer({
   storage: multer.diskStorage({
@@ -685,6 +693,28 @@ whisperWss.on('connection', (ws, req) => {
           }
           break;
         }
+        case 'room_message': {
+          const { content } = message;
+          const user = whisperUsers.get(clientId);
+          if (user) {
+            const roomId = user.roomId;
+            const usersInRoom = Array.from(whisperUsers.values()).filter(u => u.roomId === roomId);
+            const broadcastMsg = JSON.stringify({
+              type: 'room_message',
+              from: clientId,
+              fromName: user.name,
+              roomId,
+              content,
+              timestamp: Date.now()
+            });
+            usersInRoom.forEach(u => {
+              if (u.ws.readyState === WebSocket.OPEN) {
+                u.ws.send(broadcastMsg);
+              }
+            });
+          }
+          break;
+        }
 
         case 'private_file_chunk': {
           const { to, chunk, fileId, isLast, fileName, fileType, fileSize } = message;
@@ -731,6 +761,16 @@ whisperWss.on('connection', (ws, req) => {
               from: clientId,
               isTyping
             }));
+          }
+          break;
+        }
+        case 'leave': {
+          if (whisperUsers.has(clientId)) {
+            const user = whisperUsers.get(clientId);
+            const roomId = user.roomId;
+            console.log(`Whisper: User ID (${clientId}) left room ${roomId} explicitly.`);
+            whisperUsers.delete(clientId);
+            broadcastWhisperUserList(roomId);
           }
           break;
         }
