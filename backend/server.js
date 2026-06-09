@@ -200,6 +200,143 @@ app.post('/api/upload/:sessionId', (req, res) => {
   });
 });
 
+// Check status of chunked upload for resumption
+app.get('/api/upload-status/:sessionId/:fileId', (req, res) => {
+  const { sessionId, fileId } = req.params;
+  const chunkDir = path.join(__dirname, 'uploads', sessionId, 'chunks', fileId);
+  if (!fs.existsSync(chunkDir)) {
+    return res.json({ chunksReceived: 0 });
+  }
+  const files = fs.readdirSync(chunkDir);
+  const indexes = files
+    .map(f => parseInt(f, 10))
+    .filter(n => !isNaN(n))
+    .sort((a, b) => a - b);
+  
+  let expectedIndex = 0;
+  for (let i = 0; i < indexes.length; i++) {
+    if (indexes[i] === expectedIndex) {
+      expectedIndex++;
+    } else {
+      break;
+    }
+  }
+  res.json({ chunksReceived: expectedIndex });
+});
+
+// Multer storage for chunks
+const chunkStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const { sessionId, fileId } = req.params;
+    const dir = path.join(__dirname, 'uploads', sessionId, 'chunks', fileId);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const chunkIndex = req.body.chunkIndex || req.query.chunkIndex || '0';
+    cb(null, chunkIndex.toString());
+  }
+});
+const uploadChunkMiddleware = multer({ storage: chunkStorage }).single('chunk');
+
+// Receive chunk of a file
+app.post('/api/upload-chunk/:sessionId/:fileId', (req, res) => {
+  const { sessionId, fileId } = req.params;
+  const session = sessions.get(sessionId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found' });
+  }
+
+  uploadChunkMiddleware(req, res, async (err) => {
+    if (err) {
+      console.error('Chunk upload error:', err);
+      return res.status(500).json({ error: 'Chunk upload failed: ' + err.message });
+    }
+
+    const chunkIndex = parseInt(req.body.chunkIndex, 10);
+    const totalChunks = parseInt(req.body.totalChunks, 10);
+    const originalName = req.body.originalName;
+    const mimetype = req.body.mimetype || 'application/octet-stream';
+    const totalSize = parseInt(req.body.totalSize, 10);
+
+    // If it's the last chunk, merge all chunks
+    if (chunkIndex === totalChunks - 1) {
+      try {
+        const sessionDir = path.join(__dirname, 'uploads', sessionId);
+        const chunkDir = path.join(sessionDir, 'chunks', fileId);
+        const uniqueFilename = `${Date.now()}-${uuidv4()}${path.extname(originalName)}`;
+        const finalPath = path.join(sessionDir, uniqueFilename);
+
+        const writeStream = fs.createWriteStream(finalPath);
+        
+        for (let i = 0; i < totalChunks; i++) {
+          const chunkPath = path.join(chunkDir, i.toString());
+          if (!fs.existsSync(chunkPath)) {
+            throw new Error(`Missing chunk index ${i}`);
+          }
+          const chunkBuffer = fs.readFileSync(chunkPath);
+          writeStream.write(chunkBuffer);
+        }
+        
+        writeStream.end();
+
+        // Wait for write stream to finish writing
+        await new Promise((resolve, reject) => {
+          writeStream.on('finish', resolve);
+          writeStream.on('error', reject);
+        });
+
+        // Clean up chunks directory
+        if (fs.existsSync(chunkDir)) {
+          fs.rmSync(chunkDir, { recursive: true, force: true });
+        }
+
+        // Add file to session
+        const fileRecord = {
+          id: fileId,
+          originalName: originalName,
+          filename: uniqueFilename,
+          path: finalPath,
+          size: totalSize,
+          mimetype: mimetype,
+          uploadedAt: Date.now()
+        };
+
+        session.files = [...session.files, fileRecord];
+        sessions.set(sessionId, session);
+
+        console.log(`Merged and completed upload of ${originalName} (${totalSize} bytes)`);
+
+        // Broadcast update
+        const filesList = [
+          ...(session.files.map(f => ({
+            id: f.id,
+            name: f.originalName,
+            size: f.size,
+            type: f.mimetype
+          }))),
+          ...(session.socketFiles || [])
+        ];
+
+        broadcastToSession(sessionId, {
+          type: 'files_updated',
+          files: filesList
+        });
+
+        return res.json({ status: 'completed', fileId });
+      } catch (error) {
+        console.error('Merge error:', error);
+        return res.status(500).json({ error: 'Merge chunks failed: ' + error.message });
+      }
+    }
+
+    res.json({ status: 'chunk_received', chunkIndex });
+  });
+});
+
 // Get session info
 app.get('/api/session/:sessionId', (req, res) => {
   const sessionId = req.params.sessionId;
@@ -839,9 +976,10 @@ function broadcastWhisperUserList(roomId) {
 }
 
 // Broadcast message to all clients in a session
-function broadcastToSession(sessionId, message) {
+function broadcastToSession(sessionId, message, excludeClientId) {
   wss.clients.forEach(client => {
     if (client.sessionId === sessionId && client.readyState === WebSocket.OPEN) {
+      if (excludeClientId && client.clientId === excludeClientId) return;
       client.send(JSON.stringify(message));
     }
   });
