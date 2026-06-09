@@ -82,6 +82,12 @@ app.use(cors({
   allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept']
 }));
 
+// ── Parallel Resumable Upload Tracking ──
+// Tracks partial uploads per session per file
+// Each file is split into chunks; each chunk stored as individual temp file.
+// When all chunks arrive, they are concatenated in order and finalized.
+const partialUploads = new Map(); // key: `${sessionId}:${fileId}` -> { path, totalBytes, fileName, receivedChunks (Set), totalChunks, updatedAt, sessionId, fileId }
+
 // Get local IP
 const getLocalIP = () => {
   return ip.address();
@@ -198,6 +204,196 @@ app.post('/api/upload/:sessionId', (req, res) => {
       }))
     });
   });
+});
+
+// ── Parallel Upload: Get upload status ──
+app.get('/api/upload/status/:sessionId/:fileId', (req, res) => {
+  const { sessionId, fileId } = req.params;
+  const key = `${sessionId}:${fileId}`;
+  const partial = partialUploads.get(key);
+
+  if (!partial) {
+    const session = sessions.get(sessionId);
+    if (session) {
+      const existing = session.files.find(f => f.id === fileId);
+      if (existing) {
+        return res.json({ uploadedBytes: existing.size, totalBytes: existing.size, complete: true });
+      }
+    }
+    return res.json({ uploadedBytes: 0, totalBytes: 0, complete: false, receivedChunks: [] });
+  }
+
+  res.json({
+    uploadedBytes: partial.receivedChunks.size * partial.chunkSize,
+    totalBytes: partial.totalBytes,
+    complete: false,
+    fileName: partial.fileName,
+    totalChunks: partial.totalChunks,
+    receivedChunks: Array.from(partial.receivedChunks),
+    chunkSize: partial.chunkSize
+  });
+});
+
+// ── Parallel Upload: Upload a single chunk ──
+// Chunks arrive in parallel and may be out of order.
+// Each chunk is saved as a separate temp file: .part_${fileId}_${chunkIndex}
+// When ALL chunks arrive, they are concatenated in order and finalized.
+app.post('/api/upload/chunk/:sessionId/:fileId', (req, res) => {
+  const { sessionId, fileId } = req.params;
+  const key = `${sessionId}:${fileId}`;
+
+  const chunkSize = parseInt(req.headers['x-chunk-size'] || '0', 10);
+  const totalBytes = parseInt(req.headers['x-total-size'] || '0', 10);
+  const fileName = req.headers['x-file-name'] || 'unknown';
+  const chunkIndex = parseInt(req.headers['x-chunk-index'] || '0', 10);
+  const totalChunks = parseInt(req.headers['x-total-chunks'] || '1', 10);
+
+  if (!chunkSize || !totalBytes || totalChunks <= 0) {
+    return res.status(400).json({ error: 'Missing required chunk headers' });
+  }
+
+  const uploadsDir = path.join(__dirname, 'uploads', sessionId);
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+
+  // Initialize or get partial upload tracker
+  if (!partialUploads.has(key)) {
+    partialUploads.set(key, {
+      totalBytes,
+      fileName,
+      sessionId,
+      fileId,
+      totalChunks,
+      chunkSize,
+      receivedChunks: new Set(),
+      updatedAt: Date.now()
+    });
+  }
+
+  const partial = partialUploads.get(key);
+  partial.updatedAt = Date.now();
+
+  // Save chunk as individual temp file (out-of-order safe)
+  const chunkFilePath = path.join(uploadsDir, `.part_${fileId}_${chunkIndex}`);
+  let dataBuffer = Buffer.alloc(0);
+
+  req.on('data', (chunk) => {
+    dataBuffer = Buffer.concat([dataBuffer, chunk]);
+  });
+
+  req.on('end', () => {
+    try {
+      // Write chunk to its own temp file
+      fs.writeFileSync(chunkFilePath, dataBuffer);
+      partial.receivedChunks.add(chunkIndex);
+      partialUploads.set(key, partial);
+
+      const uploadedBytes = partial.receivedChunks.size * chunkSize;
+      const isComplete = partial.receivedChunks.size >= totalChunks;
+      const remainingChunks = totalChunks - partial.receivedChunks.size;
+
+      console.log(`[ParallelUpload] Chunk ${chunkIndex}/${totalChunks} for ${fileName} (${remainingChunks} remaining)`);
+
+      if (isComplete) {
+        // ── ALL CHUNKS RECEIVED — Concatenate in order ──
+        console.log(`[ParallelUpload] All ${totalChunks} chunks received for ${fileName} — concatenating...`);
+
+        const finalFileName = `${Date.now()}-${uuidv4()}${path.extname(fileName)}`;
+        const finalPath = path.join(uploadsDir, finalFileName);
+        const writeStream = fs.createWriteStream(finalPath);
+
+        let concatIndex = 0;
+        const concatNext = () => {
+          if (concatIndex >= totalChunks) {
+            writeStream.end();
+            // Clean up chunk files
+            for (let i = 0; i < totalChunks; i++) {
+              const cp = path.join(uploadsDir, `.part_${fileId}_${i}`);
+              try { if (fs.existsSync(cp)) fs.unlinkSync(cp); } catch (e) { /* ignore */ }
+            }
+            partialUploads.delete(key);
+
+            // Register in session
+            const session = sessions.get(sessionId);
+            if (session) {
+              const fileEntry = {
+                id: fileId,
+                originalName: fileName,
+                filename: finalFileName,
+                path: finalPath,
+                size: totalBytes,
+                mimetype: 'application/octet-stream',
+                uploadedAt: Date.now()
+              };
+              session.files = [...session.files, fileEntry];
+              sessions.set(sessionId, session);
+
+              const filesList = session.files.map(f => ({
+                id: f.id, name: f.originalName, size: f.size, type: f.mimetype
+              }));
+              broadcastToSession(sessionId, { type: 'files_updated', files: filesList });
+              console.log(`[ParallelUpload] Upload complete for ${fileName} in session ${sessionId}`);
+            }
+
+            res.json({ uploadedBytes: totalBytes, totalBytes, complete: true });
+            return;
+          }
+
+          const cp = path.join(uploadsDir, `.part_${fileId}_${concatIndex}`);
+          if (fs.existsSync(cp)) {
+            const readStream = fs.createReadStream(cp, { highWaterMark: 1024 * 1024 });
+            readStream.pipe(writeStream, { end: false });
+            readStream.on('end', () => {
+              concatIndex++;
+              concatNext();
+            });
+            readStream.on('error', (err) => {
+              console.error(`[ParallelUpload] Concat error at chunk ${concatIndex}:`, err);
+              concatIndex++;
+              concatNext();
+            });
+          } else {
+            // Missing chunk — shouldn't happen but handle gracefully
+            console.error(`[ParallelUpload] Missing chunk ${concatIndex} for ${fileName}`);
+            concatIndex++;
+            concatNext();
+          }
+        };
+
+        concatNext();
+      } else {
+        // Return current status — how many chunks received so far
+        res.json({
+          uploadedBytes,
+          totalBytes,
+          complete: false,
+          receivedChunks: partial.receivedChunks.size,
+          totalChunks
+        });
+      }
+    } catch (err) {
+      console.error(`[ParallelUpload] Chunk save error:`, err);
+      res.status(500).json({ error: 'Failed to save chunk' });
+    }
+  });
+});
+
+// ── Parallel Upload: Cancel/Abort partial upload (cleanup all chunk files) ──
+app.delete('/api/upload/chunk/:sessionId/:fileId', (req, res) => {
+  const { sessionId, fileId } = req.params;
+  const key = `${sessionId}:${fileId}`;
+  const partial = partialUploads.get(key);
+
+  if (partial) {
+    for (let i = 0; i < (partial.totalChunks || 10000); i++) {
+      const cp = path.join(__dirname, 'uploads', sessionId, `.part_${fileId}_${i}`);
+      try { if (fs.existsSync(cp)) fs.unlinkSync(cp); } catch (e) { break; }
+    }
+    partialUploads.delete(key);
+  }
+
+  res.json({ message: 'Partial upload cancelled' });
 });
 
 // Get session info
@@ -839,9 +1035,10 @@ function broadcastWhisperUserList(roomId) {
 }
 
 // Broadcast message to all clients in a session
-function broadcastToSession(sessionId, message) {
+function broadcastToSession(sessionId, message, excludeClientId) {
   wss.clients.forEach(client => {
     if (client.sessionId === sessionId && client.readyState === WebSocket.OPEN) {
+      if (excludeClientId && client.clientId === excludeClientId) return;
       client.send(JSON.stringify(message));
     }
   });
