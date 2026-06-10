@@ -779,7 +779,8 @@ wss.on('connection', (ws, req) => {
         case 'webrtc_offer':
         case 'webrtc_answer':
         case 'webrtc_ice_candidate':
-        case 'cancel_file_transfer': {
+        case 'cancel_file_transfer':
+        case 'file_chunk_ack': {
           const targetClient = message.to;
           if (!targetClient) break;
 
