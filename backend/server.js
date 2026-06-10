@@ -684,6 +684,18 @@ wss.on('connection', (ws, req) => {
   ws.sessionId = sessionId;
   ws.clientId = clientId;
 
+  // Other peers in session (signaling only — no file data on server)
+  const peerClients = [];
+  wss.clients.forEach(client => {
+    if (
+      client.sessionId === sessionId &&
+      client.clientId !== clientId &&
+      client.readyState === WebSocket.OPEN
+    ) {
+      peerClients.push({ clientId: client.clientId });
+    }
+  });
+
   // Send current session info
   ws.send(JSON.stringify({
     type: 'connected',
@@ -693,6 +705,7 @@ wss.on('connection', (ws, req) => {
       senderName: session.senderName,
       fileCount: session.files.length,
       connectedClients: session.connectedClients,
+      peerClients,
       files: [
         ...(session.files.map(f => ({
           id: f.id,
@@ -731,6 +744,8 @@ wss.on('connection', (ws, req) => {
                 size: fileSize,
                 type: fileType,
                 isSocketFile: true,
+                isP2PFile: true,
+                ownerId: clientId,
                 announcedAt: Date.now()
               });
 
@@ -742,11 +757,43 @@ wss.on('connection', (ws, req) => {
                   name: fileName,
                   size: fileSize,
                   type: fileType,
-                  isSocketFile: true
+                  isSocketFile: true,
+                  isP2PFile: true,
+                  ownerId: clientId
                 }
-              }, clientId);
+              });
             }
           }
+          break;
+        }
+        case 'p2p_hello':
+          broadcastToSession(sessionId, {
+            type: 'p2p_hello',
+            from: clientId,
+            role: message.role || 'receiver',
+          }, clientId);
+          break;
+        case 'request_file':
+        case 'webrtc_offer':
+        case 'webrtc_answer':
+        case 'webrtc_ice_candidate':
+        case 'cancel_file_transfer': {
+          const targetClient = message.to;
+          if (!targetClient) break;
+
+          wss.clients.forEach(client => {
+            if (
+              client.sessionId === sessionId &&
+              client.clientId === targetClient &&
+              client.readyState === WebSocket.OPEN
+            ) {
+              client.send(JSON.stringify({
+                ...message,
+                from: clientId,
+                timestamp: Date.now()
+              }));
+            }
+          });
           break;
         }
         case 'broadcast_file_chunk': {
