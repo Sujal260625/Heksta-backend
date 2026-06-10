@@ -68,6 +68,7 @@ const sessions = new Map();
 const downloadStats = new Map();
 const whisperUsers = new Map(); // { clientId: { name, ws, joinedAt } }
 const whisperFiles = new Map(); // { fileId: { path, originalName, mimetype, uploadedBy, uploadedAt } }
+const SESSION_TTL_MS = 4 * 60 * 60 * 1000;
 
 const cors = require('cors');
 
@@ -92,6 +93,13 @@ const generateSessionId = () => {
   return uuidv4().substring(0, 8);
 };
 
+const getSessionExpiresAt = (session) => (session.lastActivityAt || session.createdAt) + SESSION_TTL_MS;
+
+const touchSession = (sessionId, session) => {
+  session.lastActivityAt = Date.now();
+  sessions.set(sessionId, session);
+};
+
 // Create file session
 app.post('/api/create-session', (req, res) => {
   try {
@@ -105,6 +113,7 @@ app.post('/api/create-session', (req, res) => {
       files: [],
       socketFiles: [], // Track files shared via WebSockets
       createdAt: Date.now(),
+      lastActivityAt: Date.now(),
       active: true,
       connectedClients: 0
     };
@@ -123,7 +132,9 @@ app.post('/api/create-session', (req, res) => {
       joinLink: `${globalBase}/join/${sessionId}`,
       localJoinLink: `${localBase}/join/${sessionId}`,
       serverUrl: globalBase,
-      localServerUrl: localBase
+      localServerUrl: localBase,
+      expiresAt: getSessionExpiresAt(session),
+      ttlSeconds: Math.floor(SESSION_TTL_MS / 1000)
     });
   } catch (error) {
     console.error('Session creation error:', error);
@@ -169,7 +180,7 @@ app.post('/api/upload/:sessionId', (req, res) => {
     }));
 
     session.files = [...session.files, ...files];
-    sessions.set(sessionId, session);
+    touchSession(sessionId, session);
 
     console.log(`Uploaded ${files.length} files to session ${sessionId}`);
 
@@ -209,6 +220,7 @@ app.get('/api/upload-status/:sessionId/:fileId', (req, res) => {
     if (existingFile) {
       return res.json({ chunksReceived: -1, completed: true });
     }
+    touchSession(sessionId, session);
   }
   const chunkDir = path.join(__dirname, 'uploads', sessionId, 'chunks', fileId);
   if (!fs.existsSync(chunkDir)) {
@@ -271,6 +283,7 @@ app.post('/api/upload-chunk/:sessionId/:fileId', (req, res) => {
     const originalName = req.body.originalName;
     const mimetype = req.body.mimetype || 'application/octet-stream';
     const totalSize = parseInt(req.body.totalSize, 10);
+    touchSession(sessionId, session);
 
     // If it's the last chunk, merge all chunks
     if (chunkIndex === totalChunks - 1) {
@@ -316,7 +329,7 @@ app.post('/api/upload-chunk/:sessionId/:fileId', (req, res) => {
         };
 
         session.files = [...session.files, fileRecord];
-        sessions.set(sessionId, session);
+        touchSession(sessionId, session);
 
         console.log(`Merged and completed upload of ${originalName} (${totalSize} bytes)`);
 
@@ -361,7 +374,11 @@ app.get('/api/session/:sessionId', (req, res) => {
     senderName: session.senderName,
     fileCount: session.files.length,
     connectedClients: session.connectedClients,
-    requiresPassword: !!session.password
+    requiresPassword: !!session.password,
+    createdAt: session.createdAt,
+    lastActivityAt: session.lastActivityAt || session.createdAt,
+    expiresAt: getSessionExpiresAt(session),
+    ttlSeconds: Math.max(0, Math.ceil((getSessionExpiresAt(session) - Date.now()) / 1000))
   });
 });
 
@@ -421,6 +438,7 @@ app.get('/api/download/:sessionId/:fileId', (req, res) => {
     console.log(`Download failed: File ${fileId} not found in session ${sessionId}`);
     return res.status(404).json({ error: 'File not found' });
   }
+  touchSession(sessionId, session);
 
   const filePath = file.path;
 
@@ -503,6 +521,7 @@ app.get('/api/download-all/:sessionId', (req, res) => {
     console.log(`Download all failed: No files in session ${sessionId}`);
     return res.status(400).json({ error: 'No files to download' });
   }
+  touchSession(sessionId, session);
 
   console.log(`Starting download all for session ${sessionId} (${session.files.length} files)`);
 
@@ -1138,7 +1157,7 @@ server.listen(PORT, () => {
 setInterval(() => {
   const now = Date.now();
   sessions.forEach((session, sessionId) => {
-    if (now - session.createdAt > 4 * 60 * 60 * 1000) { // 4 hours
+    if (now - (session.lastActivityAt || session.createdAt) > SESSION_TTL_MS) { // 4 hours after last activity
       sessions.delete(sessionId);
       const uploadDir = path.join(__dirname, 'uploads', sessionId);
       if (fs.existsSync(uploadDir)) {
