@@ -591,7 +591,7 @@ app.post('/api/session/:sessionId/close', (req, res) => {
 
 // GET status to verify deployments
 app.get('/api/status', (req, res) => {
-  res.json({ status: 'Heksta backend running 🚀', version: '2.0.3-leave-fix' });
+  res.json({ status: 'Heksta backend running 🚀', version: '2.1.0-cross-platform' });
 });
 
 // ── WHISPER MODE FILE UPLOAD ──
@@ -774,6 +774,8 @@ wss.on('connection', (ws, req) => {
           }, clientId);
           break;
         case 'request_file':
+        case 'transfer_pause':
+        case 'transfer_resume':
         case 'webrtc_offer':
         case 'webrtc_answer':
         case 'webrtc_ice_candidate':
