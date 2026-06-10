@@ -203,6 +203,13 @@ app.post('/api/upload/:sessionId', (req, res) => {
 // Check status of chunked upload for resumption
 app.get('/api/upload-status/:sessionId/:fileId', (req, res) => {
   const { sessionId, fileId } = req.params;
+  const session = sessions.get(sessionId);
+  if (session) {
+    const existingFile = session.files.find(f => f.id === fileId);
+    if (existingFile) {
+      return res.json({ chunksReceived: -1, completed: true });
+    }
+  }
   const chunkDir = path.join(__dirname, 'uploads', sessionId, 'chunks', fileId);
   if (!fs.existsSync(chunkDir)) {
     return res.json({ chunksReceived: 0 });
@@ -239,7 +246,10 @@ const chunkStorage = multer.diskStorage({
     cb(null, chunkIndex.toString());
   }
 });
-const uploadChunkMiddleware = multer({ storage: chunkStorage }).single('chunk');
+const uploadChunkMiddleware = multer({
+  storage: chunkStorage,
+  limits: { fileSize: 10 * 1024 * 1024 }
+}).single('chunk');
 
 // Receive chunk of a file
 app.post('/api/upload-chunk/:sessionId/:fileId', (req, res) => {
