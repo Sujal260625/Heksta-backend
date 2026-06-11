@@ -736,8 +736,10 @@ wss.on('connection', (ws, req) => {
           if (session) {
             if (!session.socketFiles) session.socketFiles = [];
 
-            // Add to session socket files if not already there
-            if (!session.socketFiles.find(f => f.id === fileId)) {
+            const existingFile = session.socketFiles.find(f => f.id === fileId);
+            if (existingFile) {
+              existingFile.ownerId = clientId;
+            } else {
               session.socketFiles.push({
                 id: fileId,
                 name: fileName,
@@ -748,21 +750,21 @@ wss.on('connection', (ws, req) => {
                 ownerId: clientId,
                 announcedAt: Date.now()
               });
-
-              // Notify others that a new file is being shared via socket
-              broadcastToSession(sessionId, {
-                type: 'file_announced',
-                file: {
-                  id: fileId,
-                  name: fileName,
-                  size: fileSize,
-                  type: fileType,
-                  isSocketFile: true,
-                  isP2PFile: true,
-                  ownerId: clientId
-                }
-              });
             }
+
+            // Notify others that a file is being shared/updated via socket
+            broadcastToSession(sessionId, {
+              type: 'file_announced',
+              file: {
+                id: fileId,
+                name: fileName,
+                size: fileSize,
+                type: fileType,
+                isSocketFile: true,
+                isP2PFile: true,
+                ownerId: clientId
+              }
+            });
           }
           break;
         }
