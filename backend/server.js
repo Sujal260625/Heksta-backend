@@ -115,7 +115,9 @@ app.post('/api/create-session', (req, res) => {
       createdAt: Date.now(),
       lastActivityAt: Date.now(),
       active: true,
-      connectedClients: 0
+      connectedClients: 0,
+      transfers: {},
+      receiverStates: {}
     };
 
     sessions.set(sessionId, session);
@@ -718,11 +720,29 @@ wss.on('connection', (ws, req) => {
     }
   }));
 
+  // Track receiver state
+  if (session.receiverStates) {
+    session.receiverStates[clientId] = {
+      joinedAt: Date.now(),
+      activeTransfers: []
+    };
+  }
+
   // Notify sender of new connection
   broadcastToSession(sessionId, {
     type: 'client_connected',
     clientId,
-    connectedClients: session.connectedClients
+    connectedClients: session.connectedClients,
+    role: 'receiver',
+    availableFiles: [
+      ...(session.files.map(f => ({
+        id: f.id,
+        name: f.originalName,
+        size: f.size,
+        type: f.mimetype
+      }))),
+      ...(session.socketFiles || [])
+    ]
   });
 
   ws.on('message', (data) => {
@@ -782,7 +802,11 @@ wss.on('connection', (ws, req) => {
         case 'webrtc_answer':
         case 'webrtc_ice_candidate':
         case 'cancel_file_transfer':
-        case 'file_chunk_ack': {
+        case 'file_chunk_ack':
+        case 'resume_request':
+        case 'resume_response':
+        case 'receiver_progress':
+        case 'transfer_state': {
           const targetClient = message.to;
           if (!targetClient) break;
 
@@ -835,10 +859,16 @@ wss.on('connection', (ws, req) => {
       session.connectedClients = Math.max(0, session.connectedClients - 1);
       sessions.set(sessionId, session);
 
+      // Remove receiver from transfer states
+      if (session.receiverStates) {
+        delete session.receiverStates[clientId];
+      }
+
       broadcastToSession(sessionId, {
         type: 'client_disconnected',
         clientId,
-        connectedClients: session.connectedClients
+        connectedClients: session.connectedClients,
+        disconnectedReceiverId: clientId
       });
     }
   });
